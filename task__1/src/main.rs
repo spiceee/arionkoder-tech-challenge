@@ -2,8 +2,12 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, web};
+use actix_web::{App, HttpResponse, HttpServer, Responder, Result, get, http::Method, web};
 use futures::StreamExt;
+use rusty_termcolor::{
+    colors::MAGENTA,
+    effects::{EffectSettings, typewriter},
+};
 
 async fn health_check() -> impl Responder {
     let status = serde_json::json!({ "status": "OK" });
@@ -24,6 +28,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use tokio::sync::mpsc;
 use tokio::task::spawn_blocking;
+
+static WARNING: &str =
+    "✋ Not a lot to see here, you should run the tests for the acceptance criteria!";
 
 #[derive(Deserialize, Serialize)]
 struct Message {
@@ -109,6 +116,13 @@ async fn messages(mut payload: web::Payload) -> impl Responder {
     HttpResponse::Ok().json(status)
 }
 
+async fn default_handler(req_method: Method) -> Result<impl Responder> {
+    match req_method {
+        Method::GET => Ok(HttpResponse::Ok().content_type("text/html").body(WARNING)),
+        _ => Ok(HttpResponse::MethodNotAllowed().finish()),
+    }
+}
+
 #[get("/hello/{name}")]
 async fn greet(name: web::Path<String>) -> impl Responder {
     format!("Hello {name}!")
@@ -116,13 +130,16 @@ async fn greet(name: web::Path<String>) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    typewriter(WARNING, &EffectSettings::default(), Some(&MAGENTA));
+
     HttpServer::new(|| {
         App::new()
             .route("/health_check", web::get().to(health_check))
             .route("/messages", web::post().to(messages))
             .service(greet)
+            .default_service(web::to(default_handler))
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("0.0.0.0", 8080))?
     .run()
     .await
 }
