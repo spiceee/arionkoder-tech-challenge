@@ -338,3 +338,352 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Instant;
+
+    #[test]
+    fn test_task_creation() {
+        let task = Task::new(1, "Test Task".to_string(), 5, || Ok(()));
+        assert_eq!(task.id(), 1);
+        assert_eq!(task.priority(), 5);
+        assert!(task.dependencies().is_empty());
+    }
+
+    #[test]
+    fn test_task_with_dependencies() {
+        let task =
+            Task::new(1, "Test Task".to_string(), 5, || Ok(())).with_dependencies(vec![2, 3]);
+        assert_eq!(task.dependencies(), &[2, 3]);
+    }
+
+    #[test]
+    fn test_scheduler_creation() {
+        let scheduler = Scheduler::new(4);
+        assert_eq!(scheduler.thread_count, 4);
+    }
+
+    #[test]
+    fn test_task_status_tracking() {
+        let scheduler = Scheduler::new(1);
+
+        let task = Task::new(1, "Test Task".to_string(), 1, || Ok(()));
+        scheduler.add_task(task);
+
+        assert_eq!(scheduler.get_task_status(1), Some(TaskStatus::Pending));
+        assert_eq!(scheduler.get_task_status(999), None);
+    }
+
+    #[test]
+    fn test_simple_task_execution() {
+        let scheduler = Scheduler::new(1);
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_clone = executed.clone();
+
+        let task = Task::new(1, "Test Task".to_string(), 1, move || {
+            executed_clone.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        scheduler.add_task(task);
+
+        // Create a clone of the scheduler before moving it
+        let scheduler_clone = Scheduler {
+            shared_state: scheduler.shared_state.clone(),
+            thread_count: scheduler.thread_count,
+        };
+
+        let handles = scheduler.start();
+
+        // Wait for task to complete
+        let start = Instant::now();
+        while !executed.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        scheduler_clone.shutdown();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert!(executed.load(Ordering::SeqCst));
+        assert_eq!(
+            scheduler_clone.get_task_status(1),
+            Some(TaskStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn test_task_priority_ordering() {
+        let scheduler = Scheduler::new(1);
+        let execution_order = Arc::new(Mutex::new(Vec::new()));
+
+        let order_clone1 = execution_order.clone();
+        let task1 = Task::new(1, "Low Priority".to_string(), 1, move || {
+            order_clone1.lock().unwrap().push(1);
+            Ok(())
+        });
+
+        let order_clone2 = execution_order.clone();
+        let task2 = Task::new(2, "High Priority".to_string(), 10, move || {
+            order_clone2.lock().unwrap().push(2);
+            Ok(())
+        });
+
+        // Add low priority first, then high priority
+        scheduler.add_task(task1);
+        scheduler.add_task(task2);
+
+        // Create a clone of the scheduler before moving it
+        let scheduler_clone = Scheduler {
+            shared_state: scheduler.shared_state.clone(),
+            thread_count: scheduler.thread_count,
+        };
+
+        let handles = scheduler.start();
+
+        // Wait for tasks to complete
+        let start = Instant::now();
+        while execution_order.lock().unwrap().len() < 2 && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        scheduler_clone.shutdown();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(*execution_order.lock().unwrap(), vec![2, 1]); // High priority task should execute first
+    }
+
+    #[test]
+    fn test_task_dependencies() {
+        let scheduler = Scheduler::new(2);
+        let execution_order = Arc::new(Mutex::new(Vec::new()));
+
+        let order_clone1 = execution_order.clone();
+        let task1 = Task::new(1, "Independent Task".to_string(), 1, move || {
+            order_clone1.lock().unwrap().push(1);
+            Ok(())
+        });
+
+        let order_clone2 = execution_order.clone();
+        let task2 = Task::new(2, "Dependent Task".to_string(), 10, move || {
+            order_clone2.lock().unwrap().push(2);
+            Ok(())
+        })
+        .with_dependencies(vec![1]);
+
+        scheduler.add_task(task2); // Add dependent task first
+        scheduler.add_task(task1); // Add dependency second
+
+        // Create a clone of the scheduler before moving it
+        let scheduler_clone = Scheduler {
+            shared_state: scheduler.shared_state.clone(),
+            thread_count: scheduler.thread_count,
+        };
+
+        let handles = scheduler.start();
+
+        // Wait for tasks to complete
+        let start = Instant::now();
+        while execution_order.lock().unwrap().len() < 2 && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        scheduler_clone.shutdown();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(*execution_order.lock().unwrap(), vec![1, 2]); // Task 1 must execute before Task 2
+    }
+
+    #[test]
+    fn test_task_failure_handling() {
+        let scheduler = Scheduler::new(1);
+
+        let task = Task::new(1, "Failing Task".to_string(), 1, || {
+            Err("Task failed".into())
+        });
+
+        scheduler.add_task(task);
+
+        // Create a clone of the scheduler before moving it
+        let scheduler_clone = Scheduler {
+            shared_state: scheduler.shared_state.clone(),
+            thread_count: scheduler.thread_count,
+        };
+
+        let handles = scheduler.start();
+
+        // Wait for task to fail
+        let start = Instant::now();
+        while scheduler_clone.get_task_status(1) != Some(TaskStatus::Failed)
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        scheduler_clone.shutdown();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(scheduler_clone.get_task_status(1), Some(TaskStatus::Failed));
+    }
+
+    #[test]
+    fn test_task_panic_handling() {
+        let scheduler = Scheduler::new(1);
+
+        let task = Task::new(1, "Panicking Task".to_string(), 1, || {
+            panic!("Task panicked");
+        });
+
+        scheduler.add_task(task);
+
+        // Create a clone of the scheduler before moving it
+        let scheduler_clone = Scheduler {
+            shared_state: scheduler.shared_state.clone(),
+            thread_count: scheduler.thread_count,
+        };
+
+        let handles = scheduler.start();
+
+        // Wait for task to fail due to panic
+        let start = Instant::now();
+        while scheduler_clone.get_task_status(1) != Some(TaskStatus::Failed)
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        scheduler_clone.shutdown();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(scheduler_clone.get_task_status(1), Some(TaskStatus::Failed));
+    }
+
+    #[test]
+    fn test_multiple_thread_execution() {
+        let scheduler = Scheduler::new(3);
+        let counter = Arc::new(AtomicU32::new(0));
+
+        for i in 1..=5 {
+            let counter_clone = counter.clone();
+            let task = Task::new(i, format!("Task {i}"), 1, move || {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            });
+            scheduler.add_task(task);
+        }
+
+        // Create a clone of the scheduler before moving it
+        let scheduler_clone = Scheduler {
+            shared_state: scheduler.shared_state.clone(),
+            thread_count: scheduler.thread_count,
+        };
+
+        let handles = scheduler.start();
+
+        // Wait for all tasks to complete
+        let start = Instant::now();
+        while counter.load(Ordering::SeqCst) < 5 && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        scheduler_clone.shutdown();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(counter.load(Ordering::SeqCst), 5);
+
+        // Check all tasks completed
+        let statuses = scheduler_clone.get_all_statuses();
+        for i in 1..=5 {
+            assert_eq!(statuses.get(&i), Some(&TaskStatus::Completed));
+        }
+    }
+
+    #[test]
+    fn test_get_all_statuses() {
+        let scheduler = Scheduler::new(1);
+
+        let task1 = Task::new(1, "Task 1".to_string(), 1, || Ok(()));
+        let task2 = Task::new(2, "Task 2".to_string(), 2, || Ok(()));
+
+        scheduler.add_task(task1);
+        scheduler.add_task(task2);
+
+        let statuses = scheduler.get_all_statuses();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses.get(&1), Some(&TaskStatus::Pending));
+        assert_eq!(statuses.get(&2), Some(&TaskStatus::Pending));
+    }
+
+    #[test]
+    fn test_complex_dependency_chain() {
+        let scheduler = Scheduler::new(2);
+        let execution_order = Arc::new(Mutex::new(Vec::new()));
+
+        // Create a chain: Task 1 -> Task 2 -> Task 3
+        let order_clone1 = execution_order.clone();
+        let task1 = Task::new(1, "Task 1".to_string(), 1, move || {
+            order_clone1.lock().unwrap().push(1);
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        });
+
+        let order_clone2 = execution_order.clone();
+        let task2 = Task::new(2, "Task 2".to_string(), 1, move || {
+            order_clone2.lock().unwrap().push(2);
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        })
+        .with_dependencies(vec![1]);
+
+        let order_clone3 = execution_order.clone();
+        let task3 = Task::new(3, "Task 3".to_string(), 1, move || {
+            order_clone3.lock().unwrap().push(3);
+            Ok(())
+        })
+        .with_dependencies(vec![2]);
+
+        // Add tasks in reverse order
+        scheduler.add_task(task3);
+        scheduler.add_task(task2);
+        scheduler.add_task(task1);
+
+        // Create a clone of the scheduler before moving it
+        let scheduler_clone = Scheduler {
+            shared_state: scheduler.shared_state.clone(),
+            thread_count: scheduler.thread_count,
+        };
+
+        let handles = scheduler.start();
+
+        // Wait for all tasks to complete
+        let start = Instant::now();
+        while execution_order.lock().unwrap().len() < 3 && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        scheduler_clone.shutdown();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(*execution_order.lock().unwrap(), vec![1, 2, 3]);
+    }
+}
