@@ -92,3 +92,42 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{App, test};
+
+    #[actix_web::test]
+    async fn test_health_check_endpoint() {
+        let app =
+            test::init_service(App::new().route("/health_check", web::get().to(health_check)))
+                .await;
+
+        let req = test::TestRequest::get().uri("/health_check").to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["status"], "OK");
+    }
+
+    #[actix_web::test]
+    async fn test_messages_endpoint() {
+        let app = test::init_service(App::new().route("/messages", web::post().to(messages))).await;
+
+        let test_message = r#"{"trackingNumber":"1234567890","status":"OK","carrier":"FedEx","expectedDeliveryDate":"2023-12-31"}"#;
+
+        let req = test::TestRequest::post()
+            .uri("/messages")
+            .set_payload(test_message)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["success"], true);
+    }
+}
