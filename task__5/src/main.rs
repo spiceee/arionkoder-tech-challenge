@@ -2,11 +2,13 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+type TaskId = u32;
+type TaskResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -14,409 +16,116 @@ pub enum TaskStatus {
     Running,
     Completed,
     Failed,
-    Blocked,
 }
 
-#[derive(Clone)]
 pub struct Task {
-    pub id: u64,
-    pub name: String,
-    pub priority: u8, // Higher number = higher priority
-    pub dependencies: Vec<u64>,
-    pub function:
-        Arc<dyn Fn() -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync>,
+    id: TaskId,
+    name: String,
+    priority: u8,
+    dependencies: Vec<TaskId>,
+    function: Box<dyn Fn() -> TaskResult + Send + Sync>,
 }
 
 impl Task {
-    pub fn new<F>(id: u64, name: String, priority: u8, function: F) -> Self
+    pub fn new<F>(id: TaskId, name: String, priority: u8, function: F) -> Self
     where
-        F: Fn() -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+        F: Fn() -> TaskResult + Send + Sync + 'static,
     {
         Self {
             id,
             name,
             priority,
             dependencies: Vec::new(),
-            function: Arc::new(function),
+            function: Box::new(function),
         }
     }
 
     #[must_use]
-    pub fn with_dependencies(mut self, dependencies: Vec<u64>) -> Self {
+    pub fn with_dependencies(mut self, dependencies: Vec<TaskId>) -> Self {
         self.dependencies = dependencies;
         self
     }
-}
 
-impl PartialEq for Task {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+    #[must_use]
+    pub const fn id(&self) -> TaskId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn priority(&self) -> u8 {
+        self.priority
+    }
+
+    #[must_use]
+    pub fn dependencies(&self) -> &[TaskId] {
+        &self.dependencies
     }
 }
 
-impl Eq for Task {}
-
-impl PartialOrd for Task {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Task {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.priority.cmp(&other.priority)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TaskResult {
-    pub task_id: u64,
-    pub status: TaskStatus,
-    pub error: Option<String>,
+#[derive(Clone)]
+struct SharedState {
+    task_queue: Arc<Mutex<VecDeque<Task>>>,
+    task_status: Arc<Mutex<HashMap<TaskId, TaskStatus>>>,
+    completed_tasks: Arc<Mutex<Vec<TaskId>>>,
+    condvar: Arc<Condvar>,
+    shutdown: Arc<Mutex<bool>>,
 }
 
 pub struct Scheduler {
-    tasks: Arc<Mutex<BinaryHeap<Task>>>,
-    task_status: Arc<Mutex<HashMap<u64, TaskStatus>>>,
-    completed_tasks: Arc<Mutex<HashSet<u64>>>,
-    failed_tasks: Arc<Mutex<HashSet<u64>>>,
-    results: Arc<Mutex<Vec<TaskResult>>>,
-    worker_count: usize,
-    shutdown: Arc<Mutex<bool>>,
-    condvar: Arc<Condvar>,
+    shared_state: SharedState,
+    thread_count: usize,
 }
 
 impl Scheduler {
     #[must_use]
-    pub fn new(worker_count: usize) -> Self {
-        Self {
-            tasks: Arc::new(Mutex::new(BinaryHeap::new())),
+    pub fn new(thread_count: usize) -> Self {
+        let shared_state = SharedState {
+            task_queue: Arc::new(Mutex::new(VecDeque::new())),
             task_status: Arc::new(Mutex::new(HashMap::new())),
-            completed_tasks: Arc::new(Mutex::new(HashSet::new())),
-            failed_tasks: Arc::new(Mutex::new(HashSet::new())),
-            results: Arc::new(Mutex::new(Vec::new())),
-            worker_count,
-            shutdown: Arc::new(Mutex::new(false)),
+            completed_tasks: Arc::new(Mutex::new(Vec::new())),
             condvar: Arc::new(Condvar::new()),
+            shutdown: Arc::new(Mutex::new(false)),
+        };
+
+        Self {
+            shared_state,
+            thread_count,
         }
     }
 
     /// # Panics
-    /// Panics if the mutex is poisoned.
+    ///
+    /// Panics if a mutex lock is poisoned.
     pub fn add_task(&self, task: Task) {
-        self.task_status
-            .lock()
-            .unwrap()
-            .insert(task.id, TaskStatus::Pending);
-        self.tasks.lock().unwrap().push(task);
-        self.condvar.notify_one();
+        let task_id = task.id();
+
+        {
+            let mut status = self.shared_state.task_status.lock().unwrap();
+            status.insert(task_id, TaskStatus::Pending);
+        }
+
+        {
+            let mut queue = self.shared_state.task_queue.lock().unwrap();
+            // Insert task maintaining priority order (higher priority first)
+            let insert_pos = queue
+                .iter()
+                .position(|t| t.priority() < task.priority())
+                .unwrap_or(queue.len());
+            queue.insert(insert_pos, task);
+        }
+
+        self.shared_state.condvar.notify_one();
     }
 
-    /// # Panics
-    /// Panics if any mutex is poisoned or if condvar operations fail.
     #[must_use]
-    pub fn run_worker(
-        worker_id: usize,
-        tasks: Arc<Mutex<BinaryHeap<Task>>>,
-        task_status: Arc<Mutex<HashMap<u64, TaskStatus>>>,
-        completed_tasks: Arc<Mutex<HashSet<u64>>>,
-        failed_tasks: Arc<Mutex<HashSet<u64>>>,
-        results: Arc<Mutex<Vec<TaskResult>>>,
-        shutdown: Arc<Mutex<bool>>,
-        condvar: Arc<Condvar>,
-    ) {
-        loop {
-            let task = Self::get_next_available_task(
-                &tasks,
-                &task_status,
-                &completed_tasks,
-                &failed_tasks,
-                &results,
-                &shutdown,
-                &condvar,
-            );
-
-            if let Some(task) = task {
-                Self::execute_task(
-                    worker_id,
-                    task,
-                    &task_status,
-                    &completed_tasks,
-                    &failed_tasks,
-                    &results,
-                    &condvar,
-                );
-            } else if *shutdown.lock().unwrap() {
-                break;
-            } else {
-                // No available tasks, wait a bit
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-
-        println!("Worker {worker_id} shutting down");
-    }
-
-    fn get_next_available_task(
-        tasks: &Arc<Mutex<BinaryHeap<Task>>>,
-        task_status: &Arc<Mutex<HashMap<u64, TaskStatus>>>,
-        completed_tasks: &Arc<Mutex<HashSet<u64>>>,
-        failed_tasks: &Arc<Mutex<HashSet<u64>>>,
-        results: &Arc<Mutex<Vec<TaskResult>>>,
-        shutdown: &Arc<Mutex<bool>>,
-        condvar: &Arc<Condvar>,
-    ) -> Option<Task> {
-        let mut tasks_guard = tasks.lock().unwrap();
-
-        // Wait for tasks or shutdown signal
-        while tasks_guard.is_empty() && !*shutdown.lock().unwrap() {
-            tasks_guard = condvar.wait(tasks_guard).unwrap();
-        }
-
-        if *shutdown.lock().unwrap() && tasks_guard.is_empty() {
-            return None;
-        }
-
-        // Find a task that can be executed (dependencies met)
-        let mut available_task = None;
-        let mut temp_tasks = Vec::new();
-
-        while let Some(task) = tasks_guard.pop() {
-            if Self::dependencies_satisfied(&task, completed_tasks) {
-                available_task = Some(task);
-                break;
-            }
-            // Check if any dependency failed
-            if Self::has_failed_dependency(&task, failed_tasks) {
-                // Mark task as failed due to dependency failure
-                task_status
-                    .lock()
-                    .unwrap()
-                    .insert(task.id, TaskStatus::Failed);
-                results.lock().unwrap().push(TaskResult {
-                    task_id: task.id,
-                    status: TaskStatus::Failed,
-                    error: Some("Dependency failed".to_string()),
-                });
-            } else {
-                // Put back in queue
-                temp_tasks.push(task);
-            }
-        }
-
-        // Put back tasks that couldn't be executed yet
-        for task in temp_tasks {
-            tasks_guard.push(task);
-        }
-
-        available_task
-    }
-
-    fn execute_task(
-        worker_id: usize,
-        task: Task,
-        task_status: &Arc<Mutex<HashMap<u64, TaskStatus>>>,
-        completed_tasks: &Arc<Mutex<HashSet<u64>>>,
-        failed_tasks: &Arc<Mutex<HashSet<u64>>>,
-        results: &Arc<Mutex<Vec<TaskResult>>>,
-        condvar: &Arc<Condvar>,
-    ) {
-        println!("Worker {worker_id} executing task: {}", task.name);
-
-        // Mark task as running
-        task_status
-            .lock()
-            .unwrap()
-            .insert(task.id, TaskStatus::Running);
-
-        // Execute task with panic handling
-        let function = Arc::clone(&task.function);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| function()));
-
-        match result {
-            Ok(Ok(())) => {
-                // Task completed successfully
-                task_status
-                    .lock()
-                    .unwrap()
-                    .insert(task.id, TaskStatus::Completed);
-                completed_tasks.lock().unwrap().insert(task.id);
-                results.lock().unwrap().push(TaskResult {
-                    task_id: task.id,
-                    status: TaskStatus::Completed,
-                    error: None,
-                });
-                println!("Worker {worker_id} completed task: {}", task.name);
-            }
-            Ok(Err(e)) => {
-                // Task failed with error
-                task_status
-                    .lock()
-                    .unwrap()
-                    .insert(task.id, TaskStatus::Failed);
-                failed_tasks.lock().unwrap().insert(task.id);
-                results.lock().unwrap().push(TaskResult {
-                    task_id: task.id,
-                    status: TaskStatus::Failed,
-                    error: Some(e.to_string()),
-                });
-                println!("Worker {worker_id} failed task: {} - Error: {e}", task.name);
-            }
-            Err(_) => {
-                // Task panicked
-                task_status
-                    .lock()
-                    .unwrap()
-                    .insert(task.id, TaskStatus::Failed);
-                failed_tasks.lock().unwrap().insert(task.id);
-                results.lock().unwrap().push(TaskResult {
-                    task_id: task.id,
-                    status: TaskStatus::Failed,
-                    error: Some("Task panicked".to_string()),
-                });
-                println!("Worker {worker_id} - task panicked: {}", task.name);
-            }
-        }
-
-        // Notify other workers that a task completed
-        condvar.notify_all();
-    }
-
-    /// # Panics
-    /// Panics if any mutex is poisoned or if condvar operations fail.
-    #[must_use]
-    pub fn start(&self) -> Vec<thread::JoinHandle<()>> {
+    pub fn start(self) -> Vec<JoinHandle<()>> {
         let mut handles = Vec::new();
 
-        for worker_id in 0..self.worker_count {
-            let tasks = Arc::clone(&self.tasks);
-            let task_status = Arc::clone(&self.task_status);
-            let completed_tasks = Arc::clone(&self.completed_tasks);
-            let failed_tasks = Arc::clone(&self.failed_tasks);
-            let results = Arc::clone(&self.results);
-            let shutdown = Arc::clone(&self.shutdown);
-            let condvar = Arc::clone(&self.condvar);
+        for thread_id in 0..self.thread_count {
+            let state = self.shared_state.clone();
 
             let handle = thread::spawn(move || {
-                loop {
-                    let task = {
-                        let mut tasks_guard = tasks.lock().unwrap();
-
-                        // Wait for tasks or shutdown signal
-                        while tasks_guard.is_empty() && !*shutdown.lock().unwrap() {
-                            tasks_guard = condvar.wait(tasks_guard).unwrap();
-                        }
-
-                        if *shutdown.lock().unwrap() && tasks_guard.is_empty() {
-                            break;
-                        }
-
-                        // Find a task that can be executed (dependencies met)
-                        let mut available_task = None;
-                        let mut temp_tasks = Vec::new();
-
-                        while let Some(task) = tasks_guard.pop() {
-                            if Self::dependencies_satisfied(&task, &completed_tasks) {
-                                available_task = Some(task);
-                                break;
-                            }
-                            // Check if any dependency failed
-                            if Self::has_failed_dependency(&task, &failed_tasks) {
-                                // Mark task as failed due to dependency failure
-                                task_status
-                                    .lock()
-                                    .unwrap()
-                                    .insert(task.id, TaskStatus::Failed);
-                                results.lock().unwrap().push(TaskResult {
-                                    task_id: task.id,
-                                    status: TaskStatus::Failed,
-                                    error: Some("Dependency failed".to_string()),
-                                });
-                            } else {
-                                // Put back in queue
-                                temp_tasks.push(task);
-                            }
-                        }
-
-                        // Put back tasks that couldn't be executed yet
-                        for task in temp_tasks {
-                            tasks_guard.push(task);
-                        }
-
-                        available_task
-                    };
-
-                    if let Some(task) = task {
-                        println!("Worker {worker_id} executing task: {}", task.name);
-
-                        // Mark task as running
-                        task_status
-                            .lock()
-                            .unwrap()
-                            .insert(task.id, TaskStatus::Running);
-
-                        // Execute task with panic handling
-                        let function = Arc::clone(&task.function);
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| function()));
-
-                        match result {
-                            Ok(Ok(())) => {
-                                // Task completed successfully
-                                task_status
-                                    .lock()
-                                    .unwrap()
-                                    .insert(task.id, TaskStatus::Completed);
-                                completed_tasks.lock().unwrap().insert(task.id);
-                                results.lock().unwrap().push(TaskResult {
-                                    task_id: task.id,
-                                    status: TaskStatus::Completed,
-                                    error: None,
-                                });
-                                println!("Worker {worker_id} completed task: {}", task.name);
-                            }
-                            Ok(Err(e)) => {
-                                // Task failed with error
-                                task_status
-                                    .lock()
-                                    .unwrap()
-                                    .insert(task.id, TaskStatus::Failed);
-                                failed_tasks.lock().unwrap().insert(task.id);
-                                results.lock().unwrap().push(TaskResult {
-                                    task_id: task.id,
-                                    status: TaskStatus::Failed,
-                                    error: Some(e.to_string()),
-                                });
-                                println!(
-                                    "Worker {worker_id} failed task: {} - Error: {e}",
-                                    task.name
-                                );
-                            }
-                            Err(_) => {
-                                // Task panicked
-                                task_status
-                                    .lock()
-                                    .unwrap()
-                                    .insert(task.id, TaskStatus::Failed);
-                                failed_tasks.lock().unwrap().insert(task.id);
-                                results.lock().unwrap().push(TaskResult {
-                                    task_id: task.id,
-                                    status: TaskStatus::Failed,
-                                    error: Some("Task panicked".to_string()),
-                                });
-                                println!("Worker {worker_id} - task panicked: {}", task.name);
-                            }
-                        }
-
-                        // Notify other workers that a task completed
-                        condvar.notify_all();
-                    } else {
-                        // No available tasks, wait a bit
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                }
-
-                println!("Worker {worker_id} shutting down");
+                Self::worker_thread(thread_id, &state);
             });
 
             handles.push(handle);
@@ -426,56 +135,124 @@ impl Scheduler {
     }
 
     /// # Panics
-    /// Panics if the mutex is poisoned.
+    ///
+    /// Panics if a mutex lock is poisoned.
     pub fn shutdown(&self) {
-        *self.shutdown.lock().unwrap() = true;
-        self.condvar.notify_all();
+        {
+            let mut shutdown = self.shared_state.shutdown.lock().unwrap();
+            *shutdown = true;
+        }
+        self.shared_state.condvar.notify_all();
     }
 
     /// # Panics
-    /// Panics if the mutex is poisoned.
+    ///
+    /// Panics if a mutex lock is poisoned.
     #[must_use]
-    pub fn get_task_status(&self, task_id: u64) -> Option<TaskStatus> {
-        self.task_status.lock().unwrap().get(&task_id).cloned()
+    pub fn get_task_status(&self, task_id: TaskId) -> Option<TaskStatus> {
+        let status = self.shared_state.task_status.lock().unwrap();
+        status.get(&task_id).cloned()
     }
 
     /// # Panics
-    /// Panics if the mutex is poisoned.
+    ///
+    /// Panics if a mutex lock is poisoned.
     #[must_use]
-    pub fn get_all_results(&self) -> Vec<TaskResult> {
-        self.results.lock().unwrap().clone()
+    pub fn get_all_statuses(&self) -> HashMap<TaskId, TaskStatus> {
+        let status = self.shared_state.task_status.lock().unwrap();
+        status.clone()
     }
 
-    /// # Panics
-    /// Panics if the mutex is poisoned.
-    #[must_use]
-    pub fn get_completion_stats(&self) -> (usize, usize, usize) {
-        let results = self.results.lock().unwrap();
-        let completed = results
-            .iter()
-            .filter(|r| r.status == TaskStatus::Completed)
-            .count();
-        let failed = results
-            .iter()
-            .filter(|r| r.status == TaskStatus::Failed)
-            .count();
-        let total = results.len();
-        drop(results);
-        (completed, failed, total)
+    fn worker_thread(thread_id: usize, state: &SharedState) {
+        loop {
+            let task = {
+                let mut queue = state.task_queue.lock().unwrap();
+
+                loop {
+                    let shutdown = *state.shutdown.lock().unwrap();
+                    if shutdown {
+                        return;
+                    }
+
+                    if let Some(task) = Self::find_ready_task(&mut queue, state) {
+                        break Some(task);
+                    }
+
+                    queue = state
+                        .condvar
+                        .wait_timeout(queue, Duration::from_millis(100))
+                        .unwrap()
+                        .0;
+                }
+            };
+
+            if let Some(task) = task {
+                println!(
+                    "Thread {} executing task: {} (ID: {})",
+                    thread_id,
+                    task.name,
+                    task.id()
+                );
+
+                // Mark task as running
+                {
+                    let mut status = state.task_status.lock().unwrap();
+                    status.insert(task.id(), TaskStatus::Running);
+                }
+
+                // Execute task with panic handling
+                let task_id = task.id();
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (task.function)()));
+
+                // Update task status based on result
+                match result {
+                    Ok(Ok(())) => {
+                        {
+                            let mut status = state.task_status.lock().unwrap();
+                            status.insert(task_id, TaskStatus::Completed);
+                        }
+                        state.completed_tasks.lock().unwrap().push(task_id);
+                        println!("Thread {thread_id} completed task ID: {task_id}");
+                    }
+                    Ok(Err(e)) => {
+                        let mut status = state.task_status.lock().unwrap();
+                        status.insert(task_id, TaskStatus::Failed);
+                        drop(status);
+                        eprintln!("Thread {thread_id} - Task {task_id} failed with error: {e}");
+                    }
+                    Err(_) => {
+                        let mut status = state.task_status.lock().unwrap();
+                        status.insert(task_id, TaskStatus::Failed);
+                        drop(status);
+                        eprintln!("Thread {thread_id} - Task {task_id} panicked");
+                    }
+                }
+
+                // Notify other threads that a task completed (might unblock dependencies)
+                state.condvar.notify_all();
+            }
+        }
     }
 
-    fn dependencies_satisfied(task: &Task, completed_tasks: &Arc<Mutex<HashSet<u64>>>) -> bool {
-        let completed = completed_tasks.lock().unwrap();
-        task.dependencies
-            .iter()
-            .all(|dep_id| completed.contains(dep_id))
-    }
+    fn find_ready_task(queue: &mut VecDeque<Task>, state: &SharedState) -> Option<Task> {
+        let completed_tasks = state.completed_tasks.lock().unwrap();
 
-    fn has_failed_dependency(task: &Task, failed_tasks: &Arc<Mutex<HashSet<u64>>>) -> bool {
-        let failed = failed_tasks.lock().unwrap();
-        task.dependencies
-            .iter()
-            .any(|dep_id| failed.contains(dep_id))
+        for i in 0..queue.len() {
+            let task = &queue[i];
+
+            // Check if all dependencies are completed
+            let dependencies_met = task
+                .dependencies()
+                .iter()
+                .all(|dep_id| completed_tasks.contains(dep_id));
+
+            if dependencies_met {
+                return queue.remove(i);
+            }
+        }
+
+        None
     }
 }
 
@@ -497,7 +274,4 @@ fn main() {
     scheduler.add_task(task_1);
     scheduler.add_task(task_2);
     let _handles = scheduler.start();
-
-    // Wait for all tasks to complete
-    scheduler.wait_for_completion();
 }
