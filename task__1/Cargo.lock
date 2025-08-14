@@ -225,17 +225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arionkoder-tech-challenge"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "futures",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1200,6 +1189,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "task__1"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

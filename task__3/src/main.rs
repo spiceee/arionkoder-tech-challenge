@@ -1,3 +1,7 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -51,7 +55,7 @@ impl PluginRegistry {
     }
 
     fn get(&self, name: &str) -> Option<&(dyn Plugin + Send + Sync)> {
-        self.plugins.get(name).map(|boxed| boxed.as_ref())
+        self.plugins.get(name).map(std::convert::AsRef::as_ref)
     }
 
     fn list_plugins(&self) -> Vec<&str> {
