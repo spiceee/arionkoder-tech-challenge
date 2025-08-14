@@ -31,10 +31,10 @@ impl DatabaseManager {
         let pool = config.pg.create_pool(None, tokio_postgres::NoTls)?;
 
         let resource_id = format!("db_manager_{}", uuid::Uuid::new_v4());
-        println!("Acquiring database resources for {resource_id}");
+        println!("👋 Acquiring database resources for {resource_id}");
 
         let connection = pool.get().await?;
-        println!("Successfully acquired database connection for {resource_id}");
+        println!("✅ Successfully acquired database connection for {resource_id}");
 
         Ok(Self {
             pool,
@@ -52,11 +52,14 @@ impl Drop for DatabaseManager {
     fn drop(&mut self) {
         if self.connection.is_some() {
             println!(
-                "Auto-cleanup: Releasing database connection for {} during drop",
+                "✌️ Auto-cleanup: Releasing database connection for {} during drop",
                 self.resource_id
             );
         }
-        println!("Database manager {} resources cleaned up", self.resource_id);
+        println!(
+            "🧹 Database manager {} resources cleaned up",
+            self.resource_id
+        );
     }
 }
 
