@@ -25,6 +25,8 @@ use actix_web::web::Json;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
+use tokio::sync::mpsc;
+use tokio::task::spawn_blocking;
 
 #[derive(Deserialize, Serialize)]
 struct Message {
@@ -38,17 +40,42 @@ struct Message {
 
 // Disable clippy::future_not_send warning
 // actix-web handlers are not Send because they run as a tokio single-threaded async runtime
+// Use tokio spawn for concurrent processing of large payloads
 #[allow(clippy::future_not_send)]
 async fn messages(mut payload: web::Payload) -> impl Responder {
-    let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("messages.txt")
-    else {
-        return HttpResponse::InternalServerError()
-            .json(serde_json::json!({ "error": "Failed to open file" }));
-    };
+    let (tx, mut rx) = mpsc::channel::<String>(100);
 
+    // Spawn a task to handle file writing
+    let file_handle = tokio::spawn(async move {
+        let Ok(_file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("messages.txt")
+        else {
+            return Err("Failed to open file");
+        };
+
+        while let Some(formatted_message) = rx.recv().await {
+            if (spawn_blocking({
+                let msg = formatted_message.clone();
+                move || {
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("messages.txt")?;
+                    file.write_all(msg.as_bytes())
+                }
+            })
+            .await)
+                .is_err()
+            {
+                return Err("Failed to write to file");
+            }
+        }
+        Ok(())
+    });
+
+    // Process payload chunks
     while let Some(chunk) = payload.next().await {
         let Ok(chunk) = chunk else { continue };
 
@@ -63,15 +90,22 @@ async fn messages(mut payload: web::Payload) -> impl Responder {
                     message.expected_delivery_date
                 );
 
-                if file.write_all(formatted_message.as_bytes()).is_err() {
+                if tx.send(formatted_message).await.is_err() {
                     return HttpResponse::InternalServerError()
-                        .json(serde_json::json!({ "error": "Failed to write to file" }));
+                        .json(serde_json::json!({ "error": "Failed to process message" }));
                 }
             } else {
                 return HttpResponse::BadRequest()
                     .json(serde_json::json!({ "error": "Malformed JSON in payload" }));
             }
         }
+    }
+
+    // Close the channel and wait for file writing to complete
+    drop(tx);
+    if let Err(e) = file_handle.await {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({ "error": format!("File writing failed: {:?}", e) }));
     }
 
     let status = serde_json::json!({ "success": true });
