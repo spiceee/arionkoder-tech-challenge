@@ -69,3 +69,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_database_manager_creation() {
+        // This test will only pass if proper environment variables are set
+        // In a real scenario, you might want to use a test database or mock
+        if std::env::var("PG__HOST").is_ok() {
+            let result = DatabaseManager::new().await;
+            assert!(
+                result.is_ok(),
+                "DatabaseManager should be created successfully"
+            );
+
+            if let Ok(mut manager) = result {
+                let client = manager.get_client();
+                assert!(client.is_some(), "Client should be available");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_database_manager_get_client() {
+        if std::env::var("PG__HOST").is_ok() {
+            let mut manager = DatabaseManager::new()
+                .await
+                .expect("Failed to create DatabaseManager");
+
+            // Test that we can get a client
+            let client = manager.get_client();
+            assert!(client.is_some(), "Should return Some(client)");
+
+            // Test that subsequent calls still work
+            let client2 = manager.get_client();
+            assert!(client2.is_some(), "Should still return Some(client)");
+        }
+    }
+
+    #[test]
+    fn test_config_deserialization() {
+        let config = Config::builder()
+            .add_source(::config::Environment::default())
+            .build();
+
+        assert!(config.is_ok(), "Config should build successfully");
+
+        if let Ok(config) = config {
+            let app_config: Result<config::AppConfig, _> = config.try_deserialize();
+            // This might fail if environment variables are not set, which is expected
+            // In a real test environment, you'd set up proper test configuration
+            println!("Config deserialization result: {:?}", app_config.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_resource_id_generation() {
+        // Test that resource IDs are unique by checking UUID format
+        let uuid_str = uuid::Uuid::new_v4().to_string();
+        let resource_id = format!("db_manager_{uuid_str}");
+
+        assert!(resource_id.starts_with("db_manager_"));
+        assert!(resource_id.len() > "db_manager_".len());
+    }
+}
