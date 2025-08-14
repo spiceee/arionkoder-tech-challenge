@@ -44,7 +44,6 @@ struct Message {
 
 // Disable clippy::future_not_send warning
 // actix-web handlers are not Send because they run as a tokio single-threaded async runtime
-// Use tokio spawn for concurrent processing of large payloads
 #[allow(clippy::future_not_send)]
 async fn messages(mut payload: web::Payload) -> impl Responder {
     let (tx, mut rx) = mpsc::channel::<String>(100);
