@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tokio::time::sleep;
 
 type TaskId = u32;
 type TaskResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -248,6 +249,7 @@ impl Scheduler {
                 .all(|dep_id| completed_tasks.contains(dep_id));
 
             if dependencies_met {
+                println!("All dependencies met for {}", task.id());
                 return queue.remove(i);
             }
         }
@@ -256,10 +258,12 @@ impl Scheduler {
     }
 }
 
-fn main() {
-    let scheduler = Scheduler::new(2);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let scheduler = Scheduler::new(1);
 
     let task_1 = Task::new(1, "Task 1".to_string(), 1, || {
+        std::thread::sleep(Duration::from_secs(10));
         println!("Executing Task 1");
         Ok(())
     })
@@ -271,7 +275,43 @@ fn main() {
     })
     .with_dependencies(vec![]);
 
+    let task_3 = Task::new(3, "Task 3".to_string(), 3, || {
+        println!("Executing Task 3");
+        Ok(())
+    })
+    .with_dependencies(vec![1]);
+
     scheduler.add_task(task_1);
     scheduler.add_task(task_2);
-    let _handles = scheduler.start();
+    scheduler.add_task(task_3);
+
+    // Create a clone of the shared state before moving scheduler
+    let scheduler_clone = Scheduler {
+        shared_state: scheduler.shared_state.clone(),
+        thread_count: scheduler.thread_count,
+    };
+
+    let handles = scheduler.start();
+
+    // Wait for all tasks to complete
+    loop {
+        let all_statuses = scheduler_clone.get_all_statuses();
+        let all_completed = all_statuses
+            .values()
+            .all(|status| matches!(status, TaskStatus::Completed | TaskStatus::Failed));
+
+        if all_completed {
+            break;
+        }
+
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    scheduler_clone.shutdown();
+
+    // Wait for all worker threads to finish
+    for handle in handles {
+        handle.join().expect("Worker thread panicked");
+    }
+    Ok(())
 }
