@@ -1,9 +1,7 @@
-#![allow(unused_imports)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-use actix_web::web::Bytes;
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, web};
 use futures::StreamExt;
 
@@ -21,7 +19,6 @@ async fn health_check() -> impl Responder {
 }
 */
 
-use actix_web::web::Json;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
