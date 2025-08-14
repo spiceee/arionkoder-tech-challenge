@@ -135,6 +135,26 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn test_messages_endpoint_success_with_multiple_messages() {
+        let app = test::init_service(App::new().route("/messages", web::post().to(messages))).await;
+
+        let test_messages = r#"{"trackingNumber":"1234567890","status":"OK","carrier":"FedEx","expectedDeliveryDate":"2023-12-31"}
+        {"trackingNumber":"0987654321","status":"In Transit","carrier":"UPS","expectedDeliveryDate":"2024-01-15"}
+        {"trackingNumber":"1122334455","status":"Delivered","carrier":"USPS","expectedDeliveryDate":"2023-12-28"}"#;
+
+        let req = test::TestRequest::post()
+            .uri("/messages")
+            .set_payload(test_messages)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["success"], true);
+    }
+
+    #[actix_web::test]
     async fn test_messages_endpoint_with_badly_formatted_message() {
         let app = test::init_service(App::new().route("/messages", web::post().to(messages))).await;
 
