@@ -1,0 +1,12 @@
+FROM postgres:15
+
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends postgresql-contrib
+
+ENV POSTGRES_DB=arionkoder-tech-challenge
+ENV POSTGRES_USER=arionkoder_admin
+ENV POSTGRES_PASSWORD=arionkoder_pass
+
+# Copy in the load-extensions script
+COPY bin/load-extensions.sh /docker-entrypoint-initdb.d/load-extensions.sh
+RUN chmod 0755 /docker-entrypoint-initdb.d/load-extensions.sh

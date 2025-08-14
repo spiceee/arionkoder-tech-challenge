@@ -1,0 +1,9 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile-pg-dev
+    ports:
+      - 5432:5432
+    volumes:
+      - ./db-data:/var/lib/postgresql/data
