@@ -67,6 +67,9 @@ async fn messages(mut payload: web::Payload) -> impl Responder {
                     return HttpResponse::InternalServerError()
                         .json(serde_json::json!({ "error": "Failed to write to file" }));
                 }
+            } else {
+                return HttpResponse::BadRequest()
+                    .json(serde_json::json!({ "error": "Malformed JSON in payload" }));
             }
         }
     }
@@ -114,7 +117,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn test_messages_endpoint() {
+    async fn test_messages_endpoint_happy_path() {
         let app = test::init_service(App::new().route("/messages", web::post().to(messages))).await;
 
         let test_message = r#"{"trackingNumber":"1234567890","status":"OK","carrier":"FedEx","expectedDeliveryDate":"2023-12-31"}"#;
@@ -129,5 +132,23 @@ mod tests {
 
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["success"], true);
+    }
+
+    #[actix_web::test]
+    async fn test_messages_endpoint_with_badly_formatted_message() {
+        let app = test::init_service(App::new().route("/messages", web::post().to(messages))).await;
+
+        let test_message = r#"{"trackingNumbr":"1234567890""status":"OK","carrier":"FedEx","expectedDeliveryDate":"2023-12-31"#;
+
+        let req = test::TestRequest::post()
+            .uri("/messages")
+            .set_payload(test_message)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().as_u16() == 400);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"], "Malformed JSON in payload");
     }
 }
