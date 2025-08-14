@@ -9,7 +9,7 @@ use rusty_termcolor::{
 };
 
 mod lazy_iterator {
-    // Custom iterator struct that wraps any iterator and provides lazy operations
+    // Custom iterator struct that wraps any iterator and extends it with lazy operations
     pub struct LazyIterator<I> {
         pub(crate) inner: I,
     }
