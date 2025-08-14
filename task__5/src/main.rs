@@ -2,6 +2,11 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
+use rusty_termcolor::{
+    colors::{GREEN, MAGENTA},
+    effects::{EffectSettings, typewriter},
+    formatting::println_colored,
+};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -189,7 +194,7 @@ impl Scheduler {
 
             if let Some(task) = task {
                 println!(
-                    "Thread {} executing task: {} (ID: {})",
+                    "ℹ️ Thread {} executing task: {} (ID: {})",
                     thread_id,
                     task.name,
                     task.id()
@@ -214,19 +219,19 @@ impl Scheduler {
                             status.insert(task_id, TaskStatus::Completed);
                         }
                         state.completed_tasks.lock().unwrap().push(task_id);
-                        println!("Thread {thread_id} completed task ID: {task_id}");
+                        println!("✅ Thread {thread_id} completed task ID: {task_id}");
                     }
                     Ok(Err(e)) => {
                         let mut status = state.task_status.lock().unwrap();
                         status.insert(task_id, TaskStatus::Failed);
                         drop(status);
-                        eprintln!("Thread {thread_id} - Task {task_id} failed with error: {e}");
+                        eprintln!("🚨 Thread {thread_id} - Task {task_id} failed with error: {e}");
                     }
                     Err(_) => {
                         let mut status = state.task_status.lock().unwrap();
                         status.insert(task_id, TaskStatus::Failed);
                         drop(status);
-                        eprintln!("Thread {thread_id} - Task {task_id} panicked");
+                        eprintln!("🚨 Thread {thread_id} - Task {task_id} panicked");
                     }
                 }
 
@@ -249,7 +254,7 @@ impl Scheduler {
                 .all(|dep_id| completed_tasks.contains(dep_id));
 
             if dependencies_met {
-                println!("All dependencies met for {}", task.id());
+                println!("🟢 All dependencies met for {}", task.id());
                 return queue.remove(i);
             }
         }
@@ -258,32 +263,49 @@ impl Scheduler {
     }
 }
 
+fn type_write(value: &str) {
+    typewriter(
+        &format!("\n 🎺 {value:?} 🎺\n"),
+        &EffectSettings::default(),
+        Some(&GREEN),
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let scheduler = Scheduler::new(1);
+    type_write("Starting the scheduler demo!");
+
+    let scheduler = Scheduler::new(2);
 
     let task_1 = Task::new(1, "Task 1".to_string(), 1, || {
         std::thread::sleep(Duration::from_secs(10));
-        println!("Executing Task 1");
+        println!("👋 Hi from Task 1");
         Ok(())
     })
     .with_dependencies(vec![]);
 
     let task_2 = Task::new(2, "Task 2".to_string(), 2, || {
-        println!("Executing Task 2");
+        println!("👋 Hi from Task 2");
         Ok(())
     })
     .with_dependencies(vec![]);
 
     let task_3 = Task::new(3, "Task 3".to_string(), 3, || {
-        println!("Executing Task 3");
+        println!("👋 Hi from Task 3");
         Ok(())
     })
     .with_dependencies(vec![1]);
 
+    let task_4 = Task::new(4, "Task 4".to_string(), 4, || {
+        println_colored("👋 Hi from the tainted Task 4", &MAGENTA);
+        panic!("😱 Task 4 is panicking! 😱");
+    })
+    .with_dependencies(vec![3, 2]);
+
     scheduler.add_task(task_1);
     scheduler.add_task(task_2);
     scheduler.add_task(task_3);
+    scheduler.add_task(task_4);
 
     // Create a clone of the shared state before moving scheduler
     let scheduler_clone = Scheduler {
@@ -313,5 +335,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for handle in handles {
         handle.join().expect("Worker thread panicked");
     }
+
     Ok(())
 }
