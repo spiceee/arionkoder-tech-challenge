@@ -1,7 +1,9 @@
 # arionkoder-tech-challenge
 
 The tasks have individual README files.
+
 All but for Task 1 will spit out a demo that can help assert the acceptance criteria (with `cargo run`)
+
 For Task 1, you'll have to check the tests.
 
 | Challenge solutions |
