@@ -9,3 +9,8 @@ Build a basic Rust-based scheduler that:
 Constraints:
 - Gracefully handle thread panics and errors.
 - Allow simple monitoring of task completion status.
+
+## Caveats
+- Tasks are represented as closures.
+- Dependencies are represented as a list of task IDs.
+- Dependencies are a mere check for a completion status.
