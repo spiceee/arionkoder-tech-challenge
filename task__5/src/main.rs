@@ -68,6 +68,7 @@ impl Task {
     }
 }
 
+// TODO: try to make SharedState copy-able
 #[derive(Clone)]
 struct SharedState {
     task_queue: Arc<Mutex<VecDeque<Task>>>,
@@ -77,6 +78,8 @@ struct SharedState {
     shutdown: Arc<Mutex<bool>>,
 }
 
+// TODO: try to make Scheduler copy-able
+#[derive(Clone)]
 pub struct Scheduler {
     shared_state: SharedState,
     thread_count: usize,
@@ -167,6 +170,24 @@ impl Scheduler {
     pub fn get_all_statuses(&self) -> HashMap<TaskId, TaskStatus> {
         let status = self.shared_state.task_status.lock().unwrap();
         status.clone()
+    }
+
+    /// # Panics
+    ///
+    /// Panics if a mutex lock is poisoned.
+    pub async fn wait_for_all_tasks_to_complete(&self) {
+        loop {
+            let all_statuses = self.get_all_statuses();
+            let all_completed = all_statuses
+                .values()
+                .all(|status| matches!(status, TaskStatus::Completed | TaskStatus::Failed));
+
+            if all_completed {
+                break;
+            }
+
+            sleep(Duration::from_millis(100)).await;
+        }
     }
 
     fn worker_thread(thread_id: usize, state: &SharedState) {
@@ -308,27 +329,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     scheduler.add_task(task_4);
 
     // Create a clone of the shared state before moving scheduler
-    let scheduler_clone = Scheduler {
-        shared_state: scheduler.shared_state.clone(),
-        thread_count: scheduler.thread_count,
-    };
-
+    let scheduler_clone = scheduler.clone();
     let handles = scheduler.start();
 
-    // Wait for all tasks to complete
-    loop {
-        let all_statuses = scheduler_clone.get_all_statuses();
-        let all_completed = all_statuses
-            .values()
-            .all(|status| matches!(status, TaskStatus::Completed | TaskStatus::Failed));
-
-        if all_completed {
-            break;
-        }
-
-        sleep(Duration::from_millis(100)).await;
-    }
-
+    scheduler_clone.wait_for_all_tasks_to_complete().await;
     scheduler_clone.shutdown();
 
     // Wait for all worker threads to finish
@@ -391,11 +395,7 @@ mod tests {
         scheduler.add_task(task);
 
         // Create a clone of the scheduler before moving it
-        let scheduler_clone = Scheduler {
-            shared_state: scheduler.shared_state.clone(),
-            thread_count: scheduler.thread_count,
-        };
-
+        let scheduler_clone = scheduler.clone();
         let handles = scheduler.start();
 
         // Wait for task to complete
@@ -405,6 +405,7 @@ mod tests {
         }
 
         scheduler_clone.shutdown();
+
         for handle in handles {
             handle.join().unwrap();
         }
@@ -438,11 +439,7 @@ mod tests {
         scheduler.add_task(task2);
 
         // Create a clone of the scheduler before moving it
-        let scheduler_clone = Scheduler {
-            shared_state: scheduler.shared_state.clone(),
-            thread_count: scheduler.thread_count,
-        };
-
+        let scheduler_clone = scheduler.clone();
         let handles = scheduler.start();
 
         // Wait for tasks to complete
@@ -453,6 +450,7 @@ mod tests {
         }
 
         scheduler_clone.shutdown();
+
         for handle in handles {
             handle.join().unwrap();
         }
@@ -482,11 +480,7 @@ mod tests {
         scheduler.add_task(task1); // Add dependency second
 
         // Create a clone of the scheduler before moving it
-        let scheduler_clone = Scheduler {
-            shared_state: scheduler.shared_state.clone(),
-            thread_count: scheduler.thread_count,
-        };
-
+        let scheduler_clone = scheduler.clone();
         let handles = scheduler.start();
 
         // Wait for tasks to complete
@@ -497,6 +491,7 @@ mod tests {
         }
 
         scheduler_clone.shutdown();
+
         for handle in handles {
             handle.join().unwrap();
         }
@@ -515,11 +510,7 @@ mod tests {
         scheduler.add_task(task);
 
         // Create a clone of the scheduler before moving it
-        let scheduler_clone = Scheduler {
-            shared_state: scheduler.shared_state.clone(),
-            thread_count: scheduler.thread_count,
-        };
-
+        let scheduler_clone = scheduler.clone();
         let handles = scheduler.start();
 
         // Wait for task to fail
@@ -531,6 +522,7 @@ mod tests {
         }
 
         scheduler_clone.shutdown();
+
         for handle in handles {
             handle.join().unwrap();
         }
@@ -549,11 +541,7 @@ mod tests {
         scheduler.add_task(task);
 
         // Create a clone of the scheduler before moving it
-        let scheduler_clone = Scheduler {
-            shared_state: scheduler.shared_state.clone(),
-            thread_count: scheduler.thread_count,
-        };
-
+        let scheduler_clone = scheduler.clone();
         let handles = scheduler.start();
 
         // Wait for task to fail due to panic
@@ -565,6 +553,7 @@ mod tests {
         }
 
         scheduler_clone.shutdown();
+
         for handle in handles {
             handle.join().unwrap();
         }
@@ -588,11 +577,7 @@ mod tests {
         }
 
         // Create a clone of the scheduler before moving it
-        let scheduler_clone = Scheduler {
-            shared_state: scheduler.shared_state.clone(),
-            thread_count: scheduler.thread_count,
-        };
-
+        let scheduler_clone = scheduler.clone();
         let handles = scheduler.start();
 
         // Wait for all tasks to complete
@@ -602,6 +587,7 @@ mod tests {
         }
 
         scheduler_clone.shutdown();
+
         for handle in handles {
             handle.join().unwrap();
         }
@@ -665,11 +651,7 @@ mod tests {
         scheduler.add_task(task1);
 
         // Create a clone of the scheduler before moving it
-        let scheduler_clone = Scheduler {
-            shared_state: scheduler.shared_state.clone(),
-            thread_count: scheduler.thread_count,
-        };
-
+        let scheduler_clone = scheduler.clone();
         let handles = scheduler.start();
 
         // Wait for all tasks to complete
@@ -680,6 +662,7 @@ mod tests {
         }
 
         scheduler_clone.shutdown();
+
         for handle in handles {
             handle.join().unwrap();
         }
