@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-config = "0.13"
+config = "0.15"
 deadpool-postgres = { version = "0.12", features = ["serde"] }
 dotenvy = "0.15"
 postgres = { version = "0.19.7", features = ["with-chrono-0_4"] }
