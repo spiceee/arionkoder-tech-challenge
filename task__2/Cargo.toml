@@ -10,5 +10,5 @@ dotenvy = "0.15"
 postgres = { version = "0.19.12", features = ["with-chrono-0_4"] }
 serde = { version = "1.0.137", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["full"] }
-tokio-postgres = "0.7.6"
+tokio-postgres = "0.7.16"
 uuid = { version = "1", features = ["v4"] }
