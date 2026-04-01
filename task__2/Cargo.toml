@@ -7,7 +7,7 @@ edition = "2024"
 config = "0.15"
 deadpool-postgres = { version = "0.14", features = ["serde"] }
 dotenvy = "0.15"
-postgres = { version = "0.19.12", features = ["with-chrono-0_4"] }
+postgres = { version = "0.19.13", features = ["with-chrono-0_4"] }
 serde = { version = "1.0.137", features = ["derive"] }
 tokio = { version = "1.50.0", features = ["full"] }
 tokio-postgres = "0.7.16"
